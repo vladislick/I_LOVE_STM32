@@ -177,7 +177,7 @@ int main() {
 
     while (1) {
         // Делаем задержку на 10 мкс
-        TIM2->CNT = 10;
+        TIM2->CNT = 12;
         // Подаём сигнал Trig
         SET_BIT(GPIOB->BSRR, GPIO_BSRR_BS3);
         //Запускаем таймер 2

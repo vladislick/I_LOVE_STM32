@@ -5,6 +5,19 @@
 #define F 72000000UL
 // Максимальная длина строки
 #define STR_MAX 256
+// Режим отладки (отправлять в USART информацию)
+#define DEBUG_MODE 1
+// Сигнал в мкс, соответствующий середине желоба
+#define HCSR04_CENTER 1400
+// Сигнал в мкс, соответствующий максимально отдаленной точке
+#define HCSR04_RIGHT 2500
+
+// Крайнее правое положение желоба
+#define SERVO_RIGHT 250
+// Центральное положение желоба
+#define SERVO_CENTER 340
+// Крайнее левое положение желоба
+#define SERVO_LEFT 450
 
 /* ========================================================= */
 /* ======== Объявляем порты ввода-вывода устройств  ======== */
@@ -23,6 +36,10 @@
 
 // Системный счётчик (уменьшается каждую миллисекунду)
 volatile uint32_t SysCounter = 0;
+// Счётчик импульсов сервопривода 
+volatile uint16_t servoCounter = 0;
+// Текущее положение сервопривода (тиков таймера)
+volatile int16_t servoPosition = SERVO_CENTER;
 
 /* ========================================================= */
 /* ======== Немного макросов для упрощения жизни :) ======== */
@@ -103,8 +120,8 @@ void GPIO_Init() {
     MODIFY_REG(GPIOB->CRL, GPIO_CRL_CNF3|GPIO_CRL_MODE3, GPIO_CRL_MODE3_0);
     // Настраиваем пин 11 порта B на вход (Echo)
     MODIFY_REG(GPIOB->CRH, GPIO_CRH_CNF11|GPIO_CRH_MODE11, GPIO_CRH_CNF11_0);
-    // Настраиваем пин 15 порта С на выход
-    SET_PIN(GPIOC->CRH, GPIO_CRH_MODE15_0|GPIO_CRH_CNF15_0);
+    // Настраиваем пин 15 порта С на выход (Servo)
+    SET_BIT(GPIOC->CRH, GPIO_CRH_MODE15_0|GPIO_CRH_CNF15_0);
 }
 
 // Инициализация работы USART1
@@ -163,9 +180,9 @@ void TIM3_Init() {
     // Включаем глобальное прерывание таймера
     NVIC_EnableIRQ(TIM3_IRQn);
     // Задаём значение делителя счётчика (на 1 меньше желаемого значения)
-    WRITE_REG(TIM3->PSC, 3599);
+    WRITE_REG(TIM3->PSC, 36-1);
     // Задаём значение таймера, до которого он будет считать
-    WRITE_REG(TIM3->ARR, 20000);
+    WRITE_REG(TIM3->ARR, 10);
     // Разрешаем использование прерывания по переполнению
     TIM_EnableIT_UPDATE(TIM3);
     // Запускаем счётчик
@@ -186,6 +203,51 @@ void TIM3_IRQHandler() {
     if (!TIM_UpdateFlag(TIM3)) return;
     // Сбрасываем флаг переполнения счётчика
     TIM_ClearUpdateFlag(TIM3);
+    if (servoCounter < 4000) {
+        // Выключаем импульс на сервопривод
+        if (servoCounter > servoPosition) GPIOC->BSRR = GPIO_BSRR_BR15;
+        servoCounter++;
+    } else {
+        servoCounter = 0;
+        // Подаём импульс на сервопривод
+        GPIOC->BSRR = GPIO_BSRR_BS15;
+    }
+}
+
+int16_t my_abs(int16_t value) {
+    if (value < 0) return 0-value;
+    else return value;
+}
+
+// Отправка сообщений для дебага
+void debug(uint16_t hcsr04_time, int16_t u) {
+    // Строка для готового сообщения
+    char str[STR_MAX];
+    // Дистанция в сантиметрах
+    uint16_t distance;
+    // Формируем переменные
+    distance = hcsr04_time / 58;
+    // Формируем строку для передачи данных
+    sprintf(str, "Time is %d us.\nDistance is %d.\nInput is %d.\n", hcsr04_time, distance, u);
+    // Отправляем строку на ПК
+    USART1_TxStr(str);
+}
+
+// Повернуть сервопривод на угол, -200 <= angle <= 200
+void servoSet(int16_t angle) {
+    // Проверка на дурака
+    if (angle > 100 || angle < -100) return;
+    /*
+    int16_t step = 10;
+    int16_t diff = servoPosition - (SERVO_CENTER + angle);
+    if (my_abs(diff) >= step) {
+        if (diff > 0) servoPosition -= step;
+        else if (diff < 0) servoPosition += step;
+    } else if (diff != 0) {
+        if (diff > 0) servoPosition -= diff;
+        else if (diff < 0) servoPosition += diff;
+    } */
+    servoPosition = (SERVO_CENTER + angle);
 }
 
 int main() {
@@ -202,8 +264,29 @@ int main() {
     // Инициализируем USART1
     USART1_Init();
 
-    volatile uint16_t time, distance;
-    char str[STR_MAX];
+    // Время приходящего с датчика импульса в мкс
+    volatile uint16_t time, lastTime;
+    double period;
+
+    // Входное воздействие (сигнал с датчика расстояния)
+    double P = 0, I = 0, D = 0, lastP = 0;
+    // Коэффициенты регулятора
+    double kp, ki, kd;
+
+    // Топ коэффициентов:
+    // P * I * D
+    // 1) 3 * 0.2 * 0.1
+    // 2) 2 * 0.4 * 0.1
+
+    // Коэффициент пропорциональности
+    kp = 2;
+    // Коэффициент интегрирования
+    ki = 0.4;
+    // Коэффициент дифференцирования
+    kd = 0.1; 
+    // Выходной сигнал (сигнал управления сервоприводом)
+    // От -100 до 100
+    double y = 0, currentY = 0, step = 10, diff; 
 
     while (1) {
         // Делаем задержку на 10 мкс
@@ -230,13 +313,40 @@ int main() {
         TIM_DisableCounter(TIM2);
         // Сохраняем значение таймера 2
         time = 60000 - TIM2->CNT;
-        // Дистанция в сантиметрах
-        distance = time / 58;
-        // Формируем строку для передачи данных
-        sprintf(str, "Distance is %d cm.\n", distance);
-        // Отправляем строку на ПК
-        USART1_TxStr(str);
+        // Формируем сообщение и отправляем на ПК
+        if (DEBUG_MODE) debug(time, P);
+        
+        // Отбрасываем некорректные замеры датчика
+        if (time > HCSR04_RIGHT) time = lastTime;
+        
+        // Находим период замера показаний датчика
+        period = 0.050;
+        // Вычисляем коэффициент пропорциональности
+        P = (int32_t)HCSR04_CENTER - (int32_t)time;
+        P *= 0.01;
+        // Вычисляем коэффициент интегрирования
+        I = I + P * period;
+        // Вычисляем коэффициент дифференцирования
+        D = (P - lastP) / period;
+        // Находим выходной сигнал регулятора
+        y = P*kp + I*ki + D*kd;
+
+        /*
+        diff = my_abs(y - currentY);
+        if (diff >= step) {
+            if (y > currentY) currentY += step;
+            else currentY -= step;
+        } else if (diff != 0) {
+            if (y > currentY) currentY += diff;
+            else currentY -= diff;
+        }*/
+
+        // Выставляем нужный угол сервопривода
+        servoSet(-y);
+        // Запоминаем предыдущее показние датчика
+        lastTime = time;
+        lastP = P;
         // Делаем задержку перед следующим замером
-        delay_ms(250);
+        delay_ms(50);
     }
 }
