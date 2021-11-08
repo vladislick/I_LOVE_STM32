@@ -7,10 +7,11 @@
 #define STR_MAX 256
 // Режим отладки (отправлять в USART информацию)
 #define DEBUG_MODE 1
-// Сигнал в мкс, соответствующий середине желоба
-#define HCSR04_CENTER 1400
-// Сигнал в мкс, соответствующий максимально отдаленной точке
-#define HCSR04_RIGHT 2500
+// Точка удержания шарика
+#define MAIN_POINT 190
+
+// Количество замеров для усреднённого значения
+#define SMOOTH_VALUE 3
 
 // Крайнее правое положение желоба
 #define SERVO_RIGHT 250
@@ -261,13 +262,13 @@ int16_t my_abs(int16_t value) {
 }
 
 // Отправка сообщений для дебага
-void debug(uint16_t value) {
+void debug(uint16_t value, uint16_t distance) {
     // Строка для готового сообщения
     char str[STR_MAX];
     // Напряжение на входе АЦП
     int16_t voltage = value * 33 / 41;
     // Формируем строку для передачи данных
-    sprintf(str, "Voltage is %d.\n", voltage);
+    sprintf(str, "Voltage is %d.\nDistance is %d.\n", voltage, distance);
     // Отправляем строку на ПК
     USART1_TxStr(str);
 }
@@ -306,13 +307,20 @@ int main() {
     ADC_Init();
 
     // Время приходящего с датчика импульса в мкс
-    volatile uint16_t value, time, lastTime;
+    volatile uint16_t value, values[SMOOTH_VALUE], voltage, time, lastTime;
+    // Очищаем стек
+    for (uint8_t i = 0; i < SMOOTH_VALUE; i++) values[i] = 0;
     double period;
+    uint8_t count = 0;
 
     // Входное воздействие (сигнал с датчика расстояния)
     double P = 0, I = 0, D = 0, lastP = 0;
     // Коэффициенты регулятора
     double kp, ki, kd;
+    // Расстояние до шарика в мм
+    uint16_t distance;
+
+
 
     // Топ коэффициентов:
     // P * I * D
@@ -322,50 +330,41 @@ int main() {
     // Коэффициент пропорциональности
     kp = 2;
     // Коэффициент интегрирования
-    ki = 0.4;
+    ki = 0.05;
     // Коэффициент дифференцирования
-    kd = 0.1; 
+    kd = 0.3; 
     // Выходной сигнал (сигнал управления сервоприводом)
     // От -100 до 100
     double y = 0, currentY = 0, step = 10, diff; 
 
     while (1) {
         value = ADC1->DR;
-        // Делаем задержку на 10 мкс
-        TIM2->CNT = 10;
-        // Подаём сигнал Trig
-        SET_BIT(GPIOB->BSRR, GPIO_BSRR_BS3);
-        //Запускаем таймер 2
-        TIM_EnableCounter(TIM2);
-        // Ждём пока таймер 2 отсчитает 10 мкс
-        while(TIM2->CNT != 0) {}
-        // Выключаем таймер 2
-        TIM_DisableCounter(TIM2);
-        // Выключаем Trig
-        SET_BIT(GPIOB->BSRR, GPIO_BSRR_BR3);
-        // Очищаем счётчик таймера 2
-        TIM2->CNT = 60000;
-        // Ожидаем сигнала на Echo
-        while(READ_BIT(~GPIOB->IDR, GPIO_IDR_IDR11)) {}
-        // Включаем таймер 2
-        TIM_EnableCounter(TIM2);
-        // Ожидаем падение сигнала на Echo
-        while(READ_BIT(GPIOB->IDR, GPIO_IDR_IDR11)) {}
-        // Выключем таймер 2
-        TIM_DisableCounter(TIM2);
-        // Сохраняем значение таймера 2
-        time = 60000 - TIM2->CNT;
-        // Формируем сообщение и отправляем на ПК
-        if (DEBUG_MODE) debug(value);
+        if (value < 700) {
+            delay_ms(5);
+            continue;
+        }
+        // Заносим получившийся результат в стек
+        for (uint8_t i = SMOOTH_VALUE - 1; i > 0; i--)
+            values[i] = values[i - 1];
+        values[0] = value;
+        // Находим среднее значение всего стека
+        value = 0;
+        for (uint8_t i = 0; i < SMOOTH_VALUE; i++) value += values[i];
+        value /= SMOOTH_VALUE;
+
+        voltage = value * 33 / 41;
+        distance = (uint32_t)328154/voltage - 48;
+        if (count > 6) {
+            // Формируем сообщение и отправляем на ПК
+            if (DEBUG_MODE) debug(value, distance);
+            count = 0;
+        } else count++;
         
-        // Отбрасываем некорректные замеры датчика
-        if (time > HCSR04_RIGHT) time = lastTime;
         
         // Находим период замера показаний датчика
-        period = 0.050;
+        period = 0.01;
         // Вычисляем коэффициент пропорциональности
-        P = (int32_t)HCSR04_CENTER - (int32_t)time;
-        P *= 0.01;
+        P = (MAIN_POINT - distance)*0.1;
         // Вычисляем коэффициент интегрирования
         I = I + P * period;
         // Вычисляем коэффициент дифференцирования
@@ -373,23 +372,13 @@ int main() {
         // Находим выходной сигнал регулятора
         y = P*kp + I*ki + D*kd;
 
-        /*
-        diff = my_abs(y - currentY);
-        if (diff >= step) {
-            if (y > currentY) currentY += step;
-            else currentY -= step;
-        } else if (diff != 0) {
-            if (y > currentY) currentY += diff;
-            else currentY -= diff;
-        }*/
-
         // Выставляем нужный угол сервопривода
         servoSet(-y);
         // Запоминаем предыдущее показние датчика
         lastTime = time;
         lastP = P;
         // Делаем задержку перед следующим замером
-        delay_ms(50);
+        delay_ms(10);
     }
 }
 
