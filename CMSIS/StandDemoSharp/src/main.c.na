@@ -23,7 +23,7 @@
 // Крайнее правое положение желоба
 #define DEFAULT_SERVO_RIGHT 250
 // Центральное положение желоба
-#define DEFAULT_SERVO_CENTER 340
+#define DEFAULT_SERVO_CENTER 200
 // Крайнее левое положение желоба
 #define DEFAULT_SERVO_LEFT 450
 
@@ -83,15 +83,6 @@ volatile uint16_t smoothValueReady;
 // Сбросить флаг переполнения таймера
 #define TIM_ClearUpdateFlag(TIMx) CLEAR_BIT(TIMx->SR, TIM_SR_UIF)
 
-// Максимальная длина имени инструкции
-#define INSTR_NAME_LENGTH 10
-// Максимальная длина имени инструкции
-#define INSTR_ARG_NAME_LENGTH 20
-// Максимальная длина описания инструкции
-#define INSTR_DESCRIPTION_LENGTH 128
-// Максимальная длина описания инструкции
-#define INSTR_ARG_DESCRIPTION_LENGTH 128
-
 ////////////////////////////////////////////////////////////////////////////////
 ////////////  Объявление структур для инструкций и их аргументов  //////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -132,7 +123,6 @@ struct instruction
 ////////////////          Описание самих инструкций             ////////////////
 ////////////////////////////////////////////////////////////////////////////////
 
-
 // Список доступных команд
 const char* instructions_list[] = { "set", "get", "controller" };
 // Описание каждой команды
@@ -144,8 +134,6 @@ const char* instructions_description[] = {
     // Команда "controller" (индекс 2)
     "to change or show state of the PID controller"
 };
-// Количество доступных команд
-const uint8_t instructions_count = sizeof(instructions_list) / sizeof(const char*);
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////       Описание аргументов инструкций           ////////////////
@@ -193,8 +181,7 @@ const char* instructions_args_description[] = {
     "show information of the current status of PID controller"  // status
 };
 
-// Количество всех аргуметов от всех инструкций вместе взятых
-const uint8_t all_args_count = sizeof(instructions_args) / sizeof(const char*);
+
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////    Описание значений аргументов инструкций     ////////////////
@@ -262,9 +249,7 @@ const float args_max[] = {
 // Пример ссылок для аргумента инструкции
 //const char* args_links_for_something[] = { "default", "servo-max" };
 
-const char* args_links_default[] = {
-    "default"
-};
+const char* args_links_default[] = { "default" };
 
 // Названия всех ссылок у значений аргументов (пустая строка = ссылок нет)
 const char** args_links[] = {
@@ -286,9 +271,7 @@ const char** args_links[] = {
 // Пример описания ссылок для аргумента инструкции
 //const char* args_links_for_something_description[] = { "default", "servo-max" };
 
-const char* args_links_default_description[] = {
-    "use the default value for the argument"
-};
+const char* args_links_default_description[] = { "use the default value for the argument" };
 
 // Описания всех ссылок у значений аргументов (пустая строка = описания нет)
 const char** args_links_description[] = {
@@ -307,14 +290,58 @@ const char** args_links_description[] = {
     //args_links_for_something_description
 };
 
-
-
-
-
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////        Создание необходимых структур           ////////////////
 ////////////////////////////////////////////////////////////////////////////////
 
+// Общее количество инструкций
+#define INSTR_COUNT sizeof(instructions_list) / sizeof(const char*)
+// Массив с описанием всех доступных инструкций
+struct instruction instr[INSTR_COUNT];
+
+// Общее количество аргументов
+#define INSTR_ARG_COUNT sizeof(instructions_args) / sizeof(const char*)
+// Массив с описанием всех доступных аргументов инструкций
+struct argument arg[INSTR_ARG_COUNT];
+
+// Временная строка 1
+char tmp[STR_MAX];
+// Временная строка 2
+char tmp2[STR_MAX];
+
+////////////////////////////////////////////////////////////////////////////////
+//////////     Заполнение данных об инструкциях и их аргументах      ///////////
+////////////////////////////////////////////////////////////////////////////////
+
+// Инициализация списков инструкций и их аргументов
+void INTRUCTIONS_Init() {
+    // Счетчик аргументов
+    uint8_t instr_arg_counter = 0;
+
+    // Заполнение структур аргументов
+    for (uint8_t i = 0; i < INSTR_ARG_COUNT; i++) {
+        arg[i].name = instructions_args[i];
+        arg[i].description = instructions_args_description[i];
+        arg[i].flag = args_flags[i];
+        arg[i].min = args_min[i];
+        arg[i].max = args_max[i];
+        arg[i].links = args_links[i];
+        arg[i].links_description = args_links_description[i];
+    }
+
+    // Заполнение структур инструкций
+    for (uint8_t i = 0; i < INSTR_COUNT; i++) {
+        instr[i].name = instructions_list[i];
+        instr[i].description = instructions_description[i];
+        instr[i].args_count = instructions_args_count[i];
+        instr[i].args = arg + instr_arg_counter; // Смещение
+        instr_arg_counter += instr[i].args_count;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//////////                Аппаратные настройки STM32                 ///////////
+////////////////////////////////////////////////////////////////////////////////
 
 // Инициализация системного таймера
 void SysTick_Init() {
@@ -494,7 +521,7 @@ void ADC_Init() {
     // Выключаем режим сканирования каналов
     CLEAR_BIT(ADC1->CR1, ADC_CR1_SCAN);
     // Включаем глобальные прерывания для АЦП
-    //NVIC_EnableIRQ(ADC1_2_IRQn);
+    NVIC_EnableIRQ(ADC1_2_IRQn);
     // Включаем прерывание по завершению преобразования
     SET_BIT(ADC1->CR1, ADC_CR1_EOCIE);
     // Разрешаем использование АЦП
@@ -533,18 +560,11 @@ void TIM3_IRQHandler() {
 }
 
 // Прерывание АЦП
-/*void ADC1_2_IRQHandler() {
-    if (smoothIndex < SMOOTH_VALUE) {
-        smoothValue += ADC1->DR;
-        smoothIndex++;
-    } else {
-        smoothValueReady = smoothValue / SMOOTH_VALUE;
-        smoothValue = 0;
-        smoothIndex = 0;
-    }
+void ADC1_2_IRQHandler() {
+    
     // Запускаем преобразование АЦП
     SET_BIT(ADC1->CR2, ADC_CR2_SWSTART);
-}*/
+}
 
 // Реализация задержки в мс
 void my_delay_ms(uint32_t time) {
@@ -649,7 +669,7 @@ void UI_Init() {
     // Вывод сообщения 
     USART1_TxStr("Welcome to the" PROJECT_NAME "v" SOFTWARE_VERSION "!\n"
                  "Type commands below. Hints are displayed automatically if the"
-                 "input is incorrect.\nFor more help just type help.\n");
+                 " input is incorrect.\nFor more help just type help.\n");
 }
 
 // Ввод данных от пользователя
@@ -685,65 +705,53 @@ void UI_Enter(char* str) {
 // Выводит список возможных, если указанной инструкции не существует
 // Возвращает индекс инструкции, если найдена, -1 если такой, но есть возможные,
 // -2 если не совпало и нет похожих по названию
-int16_t isInstructionValid(char* dest_list, const char* instr_str, const struct instruction* instr_list) {
-    // Поиск данной инструкции
-    for (uint8_t i = 0; i < instructions_count; i++)
-        if (strcmp(instr_str, instr_list[i].name) == 0) return i;
+int16_t isInstructionValid(char* dest_list, const char* instr_str) {
     // Очистка переменной
     memset(dest_list, '\0', STR_MAX);
-    // Были ли совпадения
-    int8_t check = -2;
-    // Пробуем найти похожие по названию инструкции
-    for (uint8_t i = 0; i < instructions_count; i++)
-        // Если попалась похожая по названию
-        if (strstr(instr_list[i].name, instr_str) != NULL) {
-            if (check == -1) strcat(dest_list, ",\n");
-            strcat(dest_list, "* ");
-            strcat(dest_list, instr_list[i].name);
+    // Поиск данной инструкции
+    for (uint8_t i = 0; i < INSTR_COUNT; i++) {
+        // Если текст полностью совпадает с названием инструкции
+        if (strcmp(instr_str, instr[i].name) == 0) return i;
+        // Если попалась похожая по названию инструкция
+        else if (strstr(instr[i].name, instr_str) != NULL) {
+            strcat(dest_list, instr[i].name);
             strcat(dest_list, " (");
-            strcat(dest_list, instr_list[i].description);
-            strcat(dest_list, ")");
-            check = -1;
+            strcat(dest_list, instr[i].description);
+            strcat(dest_list, ")\n");
         }
-    // Добавляем в конец точку, если были совпадения
-    if (check == -1) strcat(dest_list, ".\n");
-    return check;
+    }
+    // Возвращаем получившийся результат
+    if (dest_list[0] != '\0') return -1;
+    else return -2;
 }
 
 // Проверяет, существует ли такой аргумент у инструкции с индексом instr_index
 // Выводит список возможных, если указанного аргумента не существует
 // Возвращает индекс аргумента, если найден, -1 если не найден, но есть возможные,
 // -2 если не совпало и нет похожих по названию
-int16_t isArgumentValid(char* dest_list, const char* arg_str, const struct instruction* instr_list, uint8_t instr_index) {
-    // Поиск полного совпадения названия
-    for (uint8_t i = 0; i < instr_list[instr_index].args_count; i++)
-        // Если совпадение найдено
-        if (strcmp(arg_str, instr_list[instr_index].args[i].name) == 0) return i;
+int16_t isArgumentValid(char* dest_list, const char* arg_str, uint8_t instr_index) {
     // Очистка переменной
     memset(dest_list, '\0', STR_MAX);
-    // Были ли совпадения
-    int8_t check = -2;
-    // Пробуем найти похожие по названию аргументы
-    for (uint8_t i = 0; i < instr_list[instr_index].args_count; i++)
-        // Если попался похожий по названию
-        if (strstr(instr_list[instr_index].args[i].name, arg_str) != NULL) {
-            if (check == -1) strcat(dest_list, ",\n");
-            strcat(dest_list, "* ");
-            strcat(dest_list, instr_list[instr_index].args[i].name);
+    // Поиск полного совпадения названия
+    for (uint8_t i = 0; i < instr[instr_index].args_count; i++)
+        // Если совпадение найдено
+        if (strcmp(arg_str, instr[instr_index].args[i].name) == 0) return i;
+        // Если найден похожий по названию аргумент
+        else if (strstr(instr[instr_index].args[i].name, arg_str) != NULL) {
+            strcat(dest_list, instr[instr_index].args[i].name);
             strcat(dest_list, " (");
-            strcat(dest_list, instr_list[instr_index].args[i].description);
-            strcat(dest_list, ")");
-            check = -1;
+            strcat(dest_list, instr[instr_index].args[i].description);
+            strcat(dest_list, ")\n");
         }
-    // Добавляем в конец точку, если были совпадения
-    if (check == -1) strcat(dest_list, ".\n");
-    return check;
+    // Возвращаем получившийся результат
+    if (dest_list[0] != '\0') return -1;
+    else return -2;
 }
 
 // Проверяет, допустим ли аргумент 
-int16_t isArgumentValueValid(char* dest_list, const char* arg_value_str, const struct instruction* instr_list, uint8_t instr_index, uint8_t arg_index) {
+int16_t isArgumentValueValid(char* dest_list, const char* arg_value_str, uint8_t instr_index, uint8_t arg_index) {
     // Достаем флаговый регистр из аргумента
-    uint8_t arg_flag = instr_list[instr_index].args[arg_index].flag;
+    uint8_t arg_flag = instr[instr_index].args[arg_index].flag;
     // Очистка переменной
     memset(dest_list, '\0', STR_MAX);
 
@@ -754,27 +762,19 @@ int16_t isArgumentValueValid(char* dest_list, const char* arg_value_str, const s
             // Поиск полного совпадения названия
             for (uint8_t i = 0; i < (arg_flag & 0b11111); i++)
                 // Если совпадение найдено
-                if (strcmp(instr_list[instr_index].args[arg_index].links[i], arg_value_str) == 0) return 1;
-            // Пригодится
-            int8_t check = 0;
-            // Если такой ссылки нет, пробуем найти похожие
-            for (uint8_t i = 0; i < (arg_flag & 0b11111); i++)
+                if (strcmp(instr[instr_index].args[arg_index].links[i], arg_value_str) == 0) return 1;
                 // Если попалась похожая по названию
-                if (strstr(instr_list[instr_index].args[arg_index].links[i], arg_value_str) != NULL) {
-                    if (check == 1) strcat(dest_list, ",\n");
-                    strcat(dest_list, "* ");
-                    strcat(dest_list, instr_list[instr_index].args[arg_index].links[i]);
+                else if (strstr(instr[instr_index].args[arg_index].links[i], arg_value_str) != NULL) {
+                    strcat(dest_list, instr[instr_index].args[arg_index].links[i]);
                     strcat(dest_list, " (");
-                    strcat(dest_list, instr_list[instr_index].args[arg_index].links_description[i]);
-                    strcat(dest_list, ")");
-                    check = 1;
+                    strcat(dest_list, instr[instr_index].args[arg_index].links_description[i]);
+                    strcat(dest_list, ")\n");
                 }
             // Добавляем в конец точку, если были совпадения
-            if (check) {
-                strcat(dest_list, ".\n");
-                return 2;
-            } else return 0;
-        } else return 0;
+            // Возвращаем получившийся результат
+            if (dest_list[0] != '\0') return 2;
+        }
+        return 0;
     } 
     // Если аргумент принимает числовые значения
     else if (arg_flag & (1 << 7)) {
@@ -783,8 +783,8 @@ int16_t isArgumentValueValid(char* dest_list, const char* arg_value_str, const s
             // Достаем значение
             float value; sscanf(arg_value_str, "%f", &value);
             // Проверяем диапазон
-            if (value >= instr_list[instr_index].args[arg_index].min &&
-                value <= instr_list[instr_index].args[arg_index].max) return 1;
+            if (value >= instr[instr_index].args[arg_index].min &&
+                value <= instr[instr_index].args[arg_index].max) return 1;
             else return 3;
         } 
         // Если необходимо целочисленное значение
@@ -792,8 +792,8 @@ int16_t isArgumentValueValid(char* dest_list, const char* arg_value_str, const s
             // Достаем значение
             int32_t value; sscanf(arg_value_str, "%li", &value);
             // Проверяем диапазон
-            if (value >= roundf(instr_list[instr_index].args[arg_index].min) &&
-                value <= roundf(instr_list[instr_index].args[arg_index].max)) return 1;
+            if (value >= roundf(instr[instr_index].args[arg_index].min) &&
+                value <= roundf(instr[instr_index].args[arg_index].max)) return 1;
             else return 3;
         }
     }
@@ -844,23 +844,141 @@ void sprintArgValuesInfo(char* dest_list, const struct instruction* instr_list, 
             // Если до этого указывались числовые значения
             if (arg_flag & (1 << 7)) strcat(dest_list, " or");
             strcat(dest_list, " text value:\n");
-            // Пригодится
-            int8_t check = 0;
             // Проходим по всем текстовым значениям
             for (uint8_t i = 0; i < (arg_flag & 0b11111); i++) {
-                if (check == 1) strcat(dest_list, ",\n");
-                strcat(dest_list, "* ");
                 strcat(dest_list, instr_list[instr_index].args[arg_index].links[i]);
                 strcat(dest_list, " (");
                 strcat(dest_list, instr_list[instr_index].args[arg_index].links_description[i]);
-                strcat(dest_list, ")");
-                check = 1;
+                strcat(dest_list, ")\n");
             }
-
         }
-        strcat(dest_list, ".\n");
     }
 }
+
+// Проверка введенной пользователем команды
+// Возвращает -1, если такой команды нет
+// Возвращает -2, если команды нет, но есть похожие
+// Возвращает индекс команды, если таковая есть
+int8_t UI_CheckCommand(const char* text) {
+    // Достаем только команду
+    parsing(tmp, text, ' ', 0);
+    // Пробуем узнать индекс команды
+    int16_t instr_index = isInstructionValid(tmp2, tmp);
+    // Если ничего не введено
+    if (tmp[0] == '\0') {
+        USART1_TxStr("ERROR: You didn't enter anything. You must use instructions below:\n");
+        USART1_TxStr(tmp2);
+    }
+    // Если такой команды не существует, но есть похожие по названию
+    else if (instr_index == -1) {
+        USART1_TxStr("ERROR: \"");
+        USART1_TxStr(tmp);
+        USART1_TxStr("\" instruction does not exist. But maybe you meant:\n");
+        USART1_TxStr(tmp2);
+    } 
+    // Если такой команды вообще не существует
+    else if (instr_index == -2) {
+        USART1_TxStr("ERROR: \"");
+        USART1_TxStr(tmp);
+        USART1_TxStr("\" instruction does not exist. You must use instructions below:\n");
+        isInstructionValid(tmp2, "");
+        USART1_TxStr(tmp2);
+    }
+    // Возвратить индекс команды
+    return instr_index;
+}
+
+// Проверка всех аргументов введенной команды 
+uint8_t UI_CheckArgs(const char* text, uint8_t instr_index) {
+    // Необходимо ли значение аргумента
+    uint8_t valueNeeded = 0;
+    // Индекс аргумента
+    int16_t arg_index;
+    // Если у рассматриваемой команды должны быть аргументы
+    if (instr[instr_index].args_count != 0) {
+        // Если к инструкции не приведены аргументы, а должны
+        if (parsingCount(text, ' ') < 2) {
+            isArgumentValid(tmp2, "", instr_index);
+            USART1_TxStr("ERROR: There is no argument for the instruction. Available arguments for \"");
+            USART1_TxStr(instr[instr_index].name);
+            USART1_TxStr("\" is:\n");
+            USART1_TxStr(tmp2);
+            return 0;
+        }
+        // Проходим по всем имеющимся аргументам (или значениям аргументов)
+        for (uint8_t i = 1; i < parsingCount(text, ' '); i++) {
+            // Получаем следующее слово из строки, введенной пользователем
+            parsing(tmp, text, ' ', i);
+            
+            // Если текущее считанное слово должно быть значением аргумента
+            if (valueNeeded) {
+                int16_t arg_value_code = isArgumentValueValid(tmp2, tmp, instr_index, arg_index);
+                // Если это текстовое значение аргумента, которому есть похожая ссылка
+                if (arg_value_code == 2) {
+                    USART1_TxStr("ERROR: Argument value \"");
+                    USART1_TxStr(tmp);
+                    USART1_TxStr("\" is non valid, but maybe you meant:\n");
+                    USART1_TxStr(tmp2);
+                    return 0;
+                } 
+                // Если это числовое значение аргумента, но не подходящее по диапазону
+                else if (arg_value_code == 3) {
+                    USART1_TxStr("ERROR: Argument value \"");
+                    USART1_TxStr(tmp);
+                    sprintArgValuesInfo(tmp2, instr, instr_index, arg_index);
+                    USART1_TxStr("\" is out of available range.\n");
+                    USART1_TxStr(tmp2);
+                    return 0;
+                } else if (arg_value_code == 0) {
+                    if (isArgumentValid(tmp2, tmp, instr_index) >= 0) {
+                        USART1_TxStr("ERROR: There is no value for argument \"");
+                        USART1_TxStr(instr[instr_index].args[arg_index].name);
+                        USART1_TxStr("\".\n");
+                        sprintArgValuesInfo(tmp2, instr, instr_index, arg_index);
+                        USART1_TxStr(tmp2);
+                    } else {
+                        USART1_TxStr("ERROR: Argument value \"");
+                        USART1_TxStr(tmp);
+                        USART1_TxStr("\" is non valid.\n");
+                    }
+                    return 0;
+                } else {
+                    valueNeeded = 0;
+                    continue;
+                }
+            }
+            
+            // Пробуем узнать индекс аргумента
+            arg_index = isArgumentValid(tmp2, tmp, instr_index);
+            // Если такого аргумента не существует
+            if (arg_index == -1) {
+                USART1_TxStr("ERROR: Argument \"");
+                USART1_TxStr(tmp);
+                USART1_TxStr("\" is non valid, but maybe you meant:\n");
+                USART1_TxStr(tmp2);
+                return 0;
+            } else if (arg_index == -2) {
+                USART1_TxStr("ERROR: Argument \"");
+                USART1_TxStr(tmp);
+                USART1_TxStr("\" is non valid.\n");
+                return 0;
+            }
+
+            // Если аргумент существует и ему требуется значение
+            if (instr[instr_index].args[arg_index].flag > 0) valueNeeded = 1;
+        }
+
+        if (valueNeeded) {
+            USART1_TxStr("ERROR: There is no value for argument \"");
+            USART1_TxStr(instr[instr_index].args[arg_index].name);
+            USART1_TxStr("\".\n");
+            sprintArgValuesInfo(tmp2, instr, instr_index, arg_index);
+            USART1_TxStr(tmp2);
+            return 0;
+        }
+    }
+    return 1;
+}   
 
 int main() {
     // Инициализируем RCC
@@ -879,49 +997,11 @@ int main() {
     ADC_Init();
     // Приветствие
     UI_Init();
-
-    // Параметры ПИД-регулятора
-    float P, I, D, m;
-
-
-
-    // Массив с описанием всех доступных инструкций
-    struct instruction instr[instructions_count];
-
-    // Массив с описанием всех доступных аргументов инструкций
-    struct argument arg[all_args_count];
+    // Инициализируем список инструкций и их аргументов
+    INTRUCTIONS_Init();
     
-    // Заполнение структур аргументов
-    for (uint8_t i = 0; i < all_args_count; i++) {
-        arg[i].name = instructions_args[i];
-        arg[i].description = instructions_args_description[i];
-        arg[i].flag = args_flags[i];
-        arg[i].min = args_min[i];
-        arg[i].max = args_max[i];
-        arg[i].links = args_links[i];
-        arg[i].links_description = args_links_description[i];
-    }
-
-    // Заполнение структур инструкций
-    uint8_t instr_arg_counter = 0;
-    for (uint8_t i = 0; i < instructions_count; i++) {
-        instr[i].name = instructions_list[i];
-        instr[i].description = instructions_description[i];
-        instr[i].args_count = instructions_args_count[i];
-        instr[i].args = arg + instr_arg_counter; // Смещение
-        instr_arg_counter += instr[i].args_count;
-    }
-
     // Временная строка
     char user[STR_MAX];
-    // Временная строка
-    char tmp[STR_MAX];
-    // Временная строка
-    char tmp2[STR_MAX];
-    // Аргументу требуется значение 
-    uint8_t valueNeeded = 0;
-    // Аргументу требуется значение 
-    uint8_t result = 1;
 
     /*// Временная строка
     char tmp[STR_MAX];
@@ -935,142 +1015,14 @@ int main() {
     while(1) { 
         // Ввод данных пользователем
         UI_Enter(user);
-        
-        parsing(tmp, user, ' ', 0);
 
-        // Пробуем узнать индекс команды
-        int16_t instr_index = isInstructionValid(tmp2, tmp, instr);
-        
-        // Если ничего не введено
-        if (tmp[0] == '\0') {
-            USART1_TxStr("ERROR: You didn't enter anything. You must use instructions below:\n");
-            USART1_TxStr(tmp2);
-            continue;
-        }
-        // Если такой команды не существует, но есть похожие по названию
-        else if (instr_index == -1) {
-            USART1_TxStr("ERROR: This instruction is non valid, but maybe you meant:\n");
-            USART1_TxStr(tmp2);
-            continue;
-        } 
-        // Если такой команды вообще не существует
-        else if (instr_index == -2) {
-            USART1_TxStr("ERROR: This instruction is non valid.\n");
-            continue;
-        }
+        // Проверка существования такой команды
+        int8_t instr_index = UI_CheckCommand(user);
+        if (instr_index < 0) continue;
 
-        // Если у рассматриваемой команды должны быть аргументы
-        if (instr[instr_index].args_count != 0) {
-            
-            // Если к инструкции не приведены аргументы, а должны
-            if (parsingCount(user, ' ') < 2) {
-                isArgumentValid(tmp2, "", instr, instr_index);
-                USART1_TxStr("ERROR: There is no argument for the instruction. Available arguments for \"");
-                USART1_TxStr(instr[instr_index].name);
-                USART1_TxStr("\" is:\n");
-                USART1_TxStr(tmp2);
-                continue;
-            }
+        // Проверка аргументов этой команды
+        if (!UI_CheckArgs(user, instr_index)) continue;
 
-            // Запоминаем результат
-            result = 1;
-            // Убираем необходимость значения аргумента
-            valueNeeded = 0;
-            // Индекс аргумента
-            int16_t arg_index;
-            // Проходим по всем имеющимся аргументам (или значениям аргументов)
-            for (uint8_t i = 1; i < parsingCount(user, ' '); i++) {
-                // Получаем следующее слово из строки, введенной пользователем
-                parsing(tmp, user, ' ', i);
-                
-                // Если текущее считанное слово должно быть значением аргумента
-                if (valueNeeded) {
-                    int16_t arg_value_code = isArgumentValueValid(tmp2, tmp, instr, instr_index, arg_index);
-                    // Если это текстовое значение аргумента, которому есть похожая ссылка
-                    if (arg_value_code == 2) {
-                        USART1_TxStr("ERROR: Argument value \"");
-                        USART1_TxStr(tmp);
-                        USART1_TxStr("\" is non valid, but maybe you meant:\n");
-                        USART1_TxStr(tmp2);
-                        result = 0;
-                        break;
-                    } 
-                    // Если это числовое значение аргумента, но не подходящее по диапазону
-                    else if (arg_value_code == 3) {
-                        USART1_TxStr("ERROR: Argument value \"");
-                        USART1_TxStr(tmp);
-                        sprintArgValuesInfo(tmp2, instr, instr_index, arg_index);
-                        USART1_TxStr("\" is out of available range.\n");
-                        USART1_TxStr(tmp2);
-                        result = 0;
-                        break;
-                    } else if (arg_value_code == 0) {
-                        if (isArgumentValid(tmp2, tmp, instr, instr_index) >= 0) {
-                            USART1_TxStr("ERROR: There is no value for argument \"");
-                            USART1_TxStr(instr[instr_index].args[arg_index].name);
-                            USART1_TxStr("\".\n");
-                            sprintArgValuesInfo(tmp2, instr, instr_index, arg_index);
-                            USART1_TxStr(tmp2);
-                        } else {
-                            USART1_TxStr("ERROR: Argument value \"");
-                            USART1_TxStr(tmp);
-                            USART1_TxStr("\" is non valid.\n");
-                        }
-                        result = 0;
-                        break;
-                    } else {
-                        valueNeeded = 0;
-                        continue;
-                    }
-                }
-                
-                // Пробуем узнать индекс аргумента
-                arg_index = isArgumentValid(tmp2, tmp, instr, instr_index);
-                // Если такого аргумента не существует
-                if (arg_index == -1) {
-                    USART1_TxStr("ERROR: Argument \"");
-                    USART1_TxStr(tmp);
-                    USART1_TxStr("\" is non valid, but maybe you meant:\n");
-                    USART1_TxStr(tmp2);
-                    result = 0;
-                    break;
-                } else if (arg_index == -2) {
-                    USART1_TxStr("ERROR: Argument \"");
-                    USART1_TxStr(tmp);
-                    USART1_TxStr("\" is non valid.\n");
-                    result = 0;
-                    break;
-                }
-
-                // Если аргумент существует и ему требуется значение
-                if (instr[instr_index].args[arg_index].flag > 0) valueNeeded = 1;
-            }
-
-            if (result && valueNeeded) {
-                USART1_TxStr("ERROR: There is no value for argument \"");
-                USART1_TxStr(instr[instr_index].args[arg_index].name);
-                USART1_TxStr("\".\n");
-                sprintArgValuesInfo(tmp2, instr, instr_index, arg_index);
-                USART1_TxStr(tmp2);
-                result = 0;
-            }
-
-            // Если проверка не прошла
-            if (!result) continue;
-        }
-
-        // Приступаем к выполнению команды
-        parsing(tmp, user, ' ', 0);
-        // Пробуем узнать индекс команды
-        int16_t instr_index = isInstructionValid(tmp2, tmp, instr);
-        if (instr_index < 0) {
-            USART1_TxStr("ERROR: There is no instruction detected.\n");
-            continue;
-        }
-        
-        // Если это команда "set"
-        if (instr_index == 0) {
-            
-        }
+        USART1_TxStr("Done.\n");
     }
 }

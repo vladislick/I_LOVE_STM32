@@ -6,48 +6,36 @@
 #define F 72000000UL
 // Максимальная длина строки
 #define STR_MAX 256
-// Режим отладки (отправлять в USART информацию)
-#define DEBUG_MODE 2
-// Точка удержания шарика
-#define MAIN_POINT 160
 
-// Количество замеров для усреднённого значения
-#define SMOOTH_VALUE 200
-
-// Крайнее правое положение желоба
-#define SERVO_RIGHT 250
-// Центральное положение желоба
-#define SERVO_CENTER 355
-// Крайнее левое положение желоба
-#define SERVO_LEFT 450
-
-/* ========================================================= */
-/* ======== Объявляем порты ввода-вывода устройств  ======== */
-/* ========================================================= */
-
-// Пин лапки Trig ультразвукового датчика (порт B)
-#define TRIG_PIN 3
-// Пин лапки Echo ультразвукового датчика (порт B)
-#define ECHO_PIN 11
 // Пин USART1 для приёма данных (порт A)
 #define USART1_RX_PIN 10
 // Пин USART1 для прередачи данных (порт A)
 #define USART1_TX_PIN 9
-// Пин сервопривода (порт С)
-#define SERVO_PIN 15
+// Размер буфера для фильтра
+#define BUF_FILTER_SIZE 500
+
+#define T 0.005
+#define d 0.5
+#define dt 0.000021
 
 // Системный счётчик (уменьшается каждую миллисекунду)
 volatile uint32_t SysCounter = 0;
-// Счётчик импульсов сервопривода 
-volatile uint16_t servoCounter = 0;
-// Текущее положение сервопривода (тиков таймера)
-volatile int16_t servoPosition = SERVO_CENTER;
-// Сглаживающий значение АЦП массив
-volatile uint32_t smoothValue = 0;
-// Текущий индекс сглаживающего массива
-volatile uint16_t smoothIndex = 0;
-// Сглаженное значение АЦП
-volatile uint16_t smoothValueReady = 0;
+// Текущее напряжение на АЦП
+volatile uint32_t voltage_mv;
+// Текущая дистанция до шарика
+volatile uint32_t distance_mm;
+// Буфер для фильтра
+volatile uint32_t buffilter[BUF_FILTER_SIZE];
+// Текущая дистанция до шарика с буферного фильтра
+volatile uint32_t distance_buffer_mm;
+// Текущая дистанция до шарика с диф.фильтра
+volatile uint32_t distance_dif_mm;
+
+volatile float d2y;
+volatile float dy;
+volatile float y;
+
+
 
 /* ========================================================= */
 /* ======== Немного макросов для упрощения жизни :) ======== */
@@ -67,7 +55,7 @@ volatile uint16_t smoothValueReady = 0;
 #define TIM_ClearUpdateFlag(TIMx) CLEAR_BIT(TIMx->SR, TIM_SR_UIF)
 
 // Реализация задержки в мс
-void delay_ms(uint32_t time) {
+void my_delay_ms(uint32_t time) {
     MODIFY_REG(SysTick->VAL, SysTick_VAL_CURRENT_Msk, F / 1000 - 1);
     SysCounter = time;
     while(SysCounter);
@@ -164,6 +152,19 @@ void USART1_TxStr(char* str) {
     }
 }
 
+// Передать uint16_t по USART1
+void USART1_TxUINT16(uint16_t data) {
+    // Ожидаем готовности модуля передачи USART1
+    while(READ_BIT(~USART1->SR, USART_SR_TXE)) {}
+    // Передаём первую часть числа USART1
+    USART1->DR = data >> 8;
+    // Ожидаем готовности модуля передачи USART1
+    while(READ_BIT(~USART1->SR, USART_SR_TXE)) {}
+    // Передаём первую часть числа USART1
+    USART1->DR = data & 0xFF;
+}
+
+
 // Инициализация таймера 2
 void TIM2_Init() {
     // Выключаем таймер 2
@@ -187,7 +188,7 @@ void TIM3_Init() {
     // Включаем тактирование таймера
     SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM3EN);
     // Включаем глобальное прерывание таймера
-    NVIC_EnableIRQ(TIM3_IRQn);
+    //NVIC_EnableIRQ(TIM3_IRQn);
     // Задаём значение делителя счётчика (на 1 меньше желаемого значения)
     WRITE_REG(TIM3->PSC, 36-1);
     // Задаём значение таймера, до которого он будет считать
@@ -242,41 +243,29 @@ void ADC_Init() {
     SET_BIT(ADC1->CR2, ADC_CR2_SWSTART);
 }
 
-// Прерывание таймера 2
-void TIM2_IRQHandler() {
-    // Проверяем, вызвано ли прерывание переполнением счётчика
-    if (!TIM_UpdateFlag(TIM2)) return;
-    // Сбрасываем флаг переполнения счётчика
-    TIM_ClearUpdateFlag(TIM2);
-}
-
-// Прерывание таймера 3
-void TIM3_IRQHandler() {
-    // Проверяем, вызвано ли прерывание переполнением счётчика
-    if (!TIM_UpdateFlag(TIM3)) return;
-    // Сбрасываем флаг переполнения счётчика
-    TIM_ClearUpdateFlag(TIM3);
-    if (servoCounter < 4000) {
-        // Выключаем импульс на сервопривод
-        if (servoCounter > servoPosition) GPIOB->BSRR = GPIO_BSRR_BR13;
-        servoCounter++;
-    } else {
-        servoCounter = 0;
-        // Подаём импульс на сервопривод
-        GPIOB->BSRR = GPIO_BSRR_BS13;
-    }
-}
-
 // Прерывание АЦП
 void ADC1_2_IRQHandler() {
-    if (smoothIndex < SMOOTH_VALUE) {
-        smoothValue += ADC1->DR;
-        smoothIndex++;
-    } else {
-        smoothValueReady = smoothValue / SMOOTH_VALUE;
-        smoothValue = 0;
-        smoothIndex = 0;
+    // Получение текущего расстояния
+    voltage_mv = ADC1->DR * 3300 / 4096;
+    distance_mm = (uint32_t)3281540/voltage_mv - 480;
+    // Получение усреднённого расстояния
+    for (uint16_t i = BUF_FILTER_SIZE - 1; i > 0; i--) {
+        buffilter[i] = buffilter[i - 1];
     }
+    buffilter[0] = distance_mm;
+    distance_buffer_mm = 0;
+    for (uint16_t i = 0; i < BUF_FILTER_SIZE; i++) {
+        distance_buffer_mm += buffilter[i];
+    }
+    distance_buffer_mm /= BUF_FILTER_SIZE;
+
+    // Диф.фильтр
+    d2y = distance_mm/(T*T) - 2*d*dy/T - y/(T*T);
+    dy = dy + d2y*dt;
+    y = y + dy*dt;
+
+    distance_dif_mm = roundf(y);
+
     // Запускаем преобразование АЦП
     SET_BIT(ADC1->CR2, ADC_CR2_SWSTART);
 }
@@ -284,46 +273,6 @@ void ADC1_2_IRQHandler() {
 int16_t my_abs(int16_t value) {
     if (value < 0) return 0-value;
     else return value;
-}
-
-// Отправка сообщений для дебага
-void debug(uint16_t value, uint16_t distance) {
-    // Строка для готового сообщения
-    char str[STR_MAX];
-    // Напряжение на входе АЦП
-    int16_t voltage = value * 33 / 41;
-    // Формируем строку для передачи данных
-    sprintf(str, "Voltage is %d.\nDistance is %d.\n", voltage, distance);
-    // Отправляем строку на ПК
-    USART1_TxStr(str);
-}
-
-
-// Отправка сообщений для дебага
-void plot(uint16_t distance, uint16_t y) {
-    USART1_Tx(distance & 0x00FF);
-    USART1_Tx(distance >> 8);
-    if (y > 200) y = 200;
-    USART1_Tx(y & 0x00FF);
-    USART1_Tx(y >> 8);
-}
-
-// Повернуть сервопривод на угол, -200 <= angle <= 200
-void servoSet(int16_t angle) {
-    // Проверка на дурака
-    if (angle > 60) angle = 60;
-    else if (angle < -60) angle = -60;
-    
-    /*int16_t step = 2;
-    int16_t diff = servoPosition - (SERVO_CENTER + angle);
-    if (my_abs(diff) >= step) {
-        if (diff > 0) servoPosition -= step;
-        else if (diff < 0) servoPosition += step;
-    } else if (diff != 0) {
-        if (diff > 0) servoPosition -= diff;
-        else if (diff < 0) servoPosition += diff;
-    } */
-    servoPosition = (SERVO_CENTER + angle);
 }
 
 int main() {
@@ -342,116 +291,13 @@ int main() {
     // Инициализируем АЦП
     ADC_Init();
 
-    // Время приходящего с датчика импульса в мкс
-    volatile uint16_t value, voltage;
-    double period;
-    uint8_t count = 0;
+    d2y = dy = y = 0;
 
-    // Входное воздействие (сигнал с датчика расстояния)
-    double P = 0, I = 0, D = 0, lastP = 0;
-    // Коэффициенты регулятора
-    double kp, ki, kd, km;
-    double MI = 0;
-    // Расстояние до шарика в мм
-    uint16_t distance;
-    char debugStr[STR_MAX];
-
-
-    // Топ коэффициентов:
-    // P * I * D
-    // 1) 3 * 0.2 * 0.1
-    // 2) 2 * 0.4 * 0.1
-
-    // Коэффициент пропорциональности
-    kp = 1;
-    // Коэффициент интегрирования
-    ki = 0.4;
-    // Коэффициент дифференцирования
-    kd = 1.0; 
-    km = 0;
-    // Выходной сигнал (сигнал управления сервоприводом)
-    // От -100 до 100
-    double y = 0; 
-
-    while (1) {
-        value = smoothValueReady;
-        
-        if (value < 700) {
-            delay_ms(5);
-            continue;
-        }
-        
-
-        voltage = value * 33 / 41;
-        distance = (uint32_t)328154/voltage - 48;
-        
-        // Находим период замера показаний датчика
-        period = 0.025;
-        // Вычисляем коэффициент пропорциональности
-        P = (MAIN_POINT - distance)*0.1;
-        // Вычисляем коэффициент интегрирования
-        if (my_abs(y) < 60) I = I + P * period;
-        // Вычисляем коэффициент дифференцирования
-        MI = MI + (((P - lastP) - MI) * 2) * period;
-        D = (MI) / period;
-        //D = ((P - lastP) ) / period;
-        //MI = MI + ((D - MI) * 1) * period;
-        // Находим выходной сигнал регулятора
-        y = P*kp + I*ki + D*kd;
-
-        // Запоминаем предыдущее показние датчика
-        lastP = P;
-        
-        // Выставляем нужный угол сервопривода
-        servoSet(-y);
-        plot(distance, y + 100);
-        delay_ms(25);
-        
-        
-        // Делаем задержку перед следующим замером
+    while(1) {
+        USART1_TxUINT16(1000);
+        USART1_TxUINT16(distance_mm);
+        USART1_TxUINT16(distance_buffer_mm);
+        USART1_TxUINT16(dy+1500);
+        my_delay_ms(10);
     }
 }
-
-/*
-// Инициализируем АЦП
-void ADC_Init() {
-    // Запрещаем использование АЦП
-    CLEAR_BIT(ADC1->CR2, ADC_CR2_ADON);
-    // Включаем тактирование АЦП
-    SET_BIT(RCC->APB2ENR, RCC_APB2ENR_ADC1EN);
-    // Включаем тактирование порта А
-    SET_BIT(RCC->APB2ENR, RCC_APB2ENR_IOPAEN);
-    // Устанавливаем предделитель АЦП на 6-ть (нельзя превышать 14 МГц)
-    MODIFY_REG(RCC->CFGR, RCC_CFGR_ADCPRE, RCC_CFGR_ADCPRE_DIV6);
-    // Очищаем регистр CR1 для будущей настройки
-    CLEAR_REG(ADC1->CR1);
-    // Очищаем регистр CR2 для будущей настройки
-    CLEAR_REG(ADC1->CR2);            // Формируем сообщение и отправляем на ПК
-
-    // Устанавливаем время выборки (количество тактов для преобразования)
-    // 28.5 циклов
-    MODIFY_REG(ADC1->SMPR2, ADC_SMPR2_SMP0, ADC_SMPR2_SMP0_0|ADC_SMPR2_SMP0_1);
-    // Выставляем нулевой канал для замера
-    CLEAR_REG(ADC1->SQR3);
-    CLEAR_REG(ADC1->SQR2);
-    CLEAR_REG(ADC1->SQR1);
-    // Выключаем инжектируемые каналы
-    CLEAR_REG(ADC1->JSQR);
-    // Запуск калибровки
-    SET_BIT(ADC1->CR2, ADC_CR2_CAL);
-    // Ждём окончания калибровки 
-    while(READ_BIT(ADC1->CR2, ADC_CR2_CAL));
-    // Программный источник запуска
-    SET_BIT(ADC1->CR2, ADC_CR2_EXTSEL);
-    // Разрешаем внешний запуск
-    SET_BIT(ADC1->CR2, ADC_CR2_EXTTRIG);
-    // Включаем режим непрерывного преобразования
-    SET_BIT(ADC1->CR2, ADC_CR2_CONT);
-    // Выключаем режим сканирования каналов
-    CLEAR_BIT(ADC1->CR1, ADC_CR1_SCAN);
-    // Разрешаем использование АЦП
-    SET_BIT(ADC1->CR2, ADC_CR2_ADON);
-    // Запускаем преобразование АЦП
-    SET_BIT(ADC1->CR2, ADC_CR2_SWSTART);
-}
-*/
