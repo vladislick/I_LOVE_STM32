@@ -1,45 +1,48 @@
 #include <stm32f1xx.h>
 #include <stdio.h>
+#include <string.h>
 
 // Системная частота (SYSCLK)
 #define F 72000000UL
 // Максимальная длина строки
 #define STR_MAX 256
-// Режим отладки (отправлять в USART информацию)
-#define DEBUG_MODE 1
-// Сигнал в мкс, соответствующий середине желоба
-#define HCSR04_CENTER 1400
-// Сигнал в мкс, соответствующий максимально отдаленной точке
-#define HCSR04_RIGHT 2500
 
-// Крайнее правое положение желоба
-#define SERVO_RIGHT 250
-// Центральное положение желоба
-#define SERVO_CENTER 340
-// Крайнее левое положение желоба
-#define SERVO_LEFT 450
 
 /* ========================================================= */
 /* ======== Объявляем порты ввода-вывода устройств  ======== */
 /* ========================================================= */
 
 // Пин лапки Trig ультразвукового датчика (порт B)
-#define TRIG_PIN 3
-// Пин лапки Echo ультразвукового датчика (порт B)
-#define ECHO_PIN 11
-// Пин USART1 для приёма данных (порт A)
-#define USART1_RX_PIN 10
-// Пин USART1 для прередачи данных (порт A)
-#define USART1_TX_PIN 9
+#define HCSR04_TRIG_PORT GPIOB
+// Пин лапки Trig ультразвукового датчика (порт B)
+#define HCSR04_TRIG_PIN 7
+// Пин лапки Trig ультразвукового датчика (порт B)
+#define HCSR04_ECHO_PORT GPIOB
+// Пин лапки Trig ультразвукового датчика (порт B)
+#define HCSR04_ECHO_PIN 6
+
 // Пин сервопривода (порт С)
-#define SERVO_PIN 15
+#define SERVO_PORT GPIOB
+// Пин сервопривода (порт С)
+#define SERVO_PIN 13
+
+// Порт USART1
+#define USART1_PORT GPIOA
+// Пин USART1 для приёма данных (порт A)
+#define USART1_PIN_RX 10
+// Пин USART1 для прередачи данных (порт A)
+#define USART1_PIN_TX 9
 
 // Системный счётчик (уменьшается каждую миллисекунду)
 volatile uint32_t SysCounter = 0;
-// Счётчик импульсов сервопривода 
-volatile uint16_t servoCounter = 0;
+
 // Текущее положение сервопривода (тиков таймера)
-volatile int16_t servoPosition = SERVO_CENTER;
+volatile int16_t servoPosition = 500;
+
+struct user_input {
+    char field[16][32];
+    uint8_t field_count;
+};
 
 /* ========================================================= */
 /* ======== Немного макросов для упрощения жизни :) ======== */
@@ -79,7 +82,7 @@ void SysTick_Init() {
 
 // Обработчик прерывания системного таймера
 void SysTick_Handler() {
-    if (SysCounter != 0) SysCounter--;
+    if (SysCounter > 0) SysCounter--;
 }
 
 // Инициализация тактирования микроконтроллера (портов, таймеров и т.д.)       
@@ -113,15 +116,14 @@ void GPIO_Init() {
     SET_BIT(RCC->APB2ENR, RCC_APB2ENR_IOPCEN);
     // Включаем тактирование порта B
     SET_BIT(RCC->APB2ENR, RCC_APB2ENR_IOPBEN);
-    // Настраиваем пин 13 порта C на выход
-    SET_BIT(GPIOC->CRH, GPIO_CRH_MODE13_0);
-    SET_BIT(GPIOC->BSRR, GPIO_BSRR_BR13);
-    // Настраиваем пин 3 порта B на выход (Trig)
-    MODIFY_REG(GPIOB->CRL, GPIO_CRL_CNF3|GPIO_CRL_MODE3, GPIO_CRL_MODE3_0);
-    // Настраиваем пин 11 порта B на вход (Echo)
-    MODIFY_REG(GPIOB->CRH, GPIO_CRH_CNF11|GPIO_CRH_MODE11, GPIO_CRH_CNF11_0);
-    // Настраиваем пин 15 порта С на выход (Servo)
-    SET_BIT(GPIOC->CRH, GPIO_CRH_MODE15_0|GPIO_CRH_CNF15_0);
+    // Настраиваем сервопривод
+    MODIFY_REG(SERVO_PORT->CRH, GPIO_CRH_MODE13|GPIO_CRH_CNF13, GPIO_CRH_MODE13_0|GPIO_CRH_CNF13_0);
+    SERVO_PORT->BSRR = GPIO_BSRR_BR13;
+    // Настраиваем Trig
+    MODIFY_REG(HCSR04_TRIG_PORT->CRL, GPIO_CRL_MODE7|GPIO_CRL_CNF7, GPIO_CRL_MODE7_0|GPIO_CRL_CNF7_0); 
+    HCSR04_TRIG_PORT->BSRR = GPIO_BSRR_BS7;
+    // Настраиваем Echo
+    MODIFY_REG(HCSR04_ECHO_PORT->CRL, GPIO_CRL_MODE6|GPIO_CRL_CNF6, GPIO_CRL_CNF6_1);
 }
 
 // Инициализация работы USART1
@@ -146,35 +148,61 @@ void USART1_Tx(char ch) {
 }
 
 // Передать строку по USART1
-void USART1_TxStr(char* str) {
-    // Отправляем символы, пока не встретим символ конца строки
-    // или счётчик не переполнится
-    for (uint16_t i = 0; i < STR_MAX; i++) {
-        if (str[i] == '\0') break;
-        USART1_Tx(str[i]);
-    }
+void USART1_TxStr(const char* str) {
+    for (uint16_t i = 0; str[i] != '\0'; i++) USART1_Tx(str[i]);
 }
 
-// Инициализация таймера 2
+// Обработчик USART1
+char* USART1_Tick() {
+    // Буффер для хранения введенных команд пользователем
+    static char tmp[128];
+    // Текущее положение курсора на экране
+    static uint8_t tmp_index = 0;
+    // Считываемый байт данных
+    static char tmp_char;
+    // Если что-то пришло
+    if (USART1->SR & USART_SR_RXNE) {
+        tmp_char = USART1->DR;
+        // Если пришёл символ стирания (Backspace)
+        if (tmp_char == 8) {
+            tmp_index--;
+            USART1_Tx(tmp_char);
+            USART1_Tx(' ');
+            USART1_Tx(tmp_char);
+            return NULL;
+        } else if (tmp_char == '\n') {
+            tmp[tmp_index] = '\0';
+            tmp_index = 0;
+            return tmp;
+        } else if (tmp_char == '\r') return NULL;
+        tmp[tmp_index++] = tmp_char;
+        USART1_Tx(tmp_char);
+    }
+    return NULL;
+}
+
+// Инициализация таймера 2 (работа с HC-SR04)
 void TIM2_Init() {
     // Выключаем таймер 2
-    TIM_DisableCounter(TIM2);
+    //TIM_DisableCounter(TIM2);
     // Включаем тактирование таймера
     SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM2EN);
     // Включаем глобальное прерывание таймера
-    //NVIC_EnableIRQ(TIM2_IRQn);
+    NVIC_EnableIRQ(TIM2_IRQn);
     // Задаём значение делителя счётчика (на 1 меньше желаемого значения)
-    WRITE_REG(TIM2->PSC, 72-1);
+    WRITE_REG(TIM2->PSC, 36-1);
     // Задаём значение таймера, до которого он будет считать
-    WRITE_REG(TIM2->ARR, 65000);
+    WRITE_REG(TIM2->ARR, 4-1);
     // Разрешаем использование прерывания по переполнению
-    //TIM_EnableIT_UPDATE(TIM2);
-    // Включаем таймер 2 в режим обратного отсчёта
-    SET_BIT(TIM2->CR1, TIM_CR1_DIR);
+    TIM_EnableIT_UPDATE(TIM2);
+    // Запускаем счётчик
+    TIM_EnableCounter(TIM2);
 }
 
-// Инициализация таймера 3
+// Инициализация таймера 3 (работа с сервоприводом)
 void TIM3_Init() {
+    // Выключаем таймер 3
+    //TIM_DisableCounter(TIM3);
     // Включаем тактирование таймера
     SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM3EN);
     // Включаем глобальное прерывание таймера
@@ -182,35 +210,54 @@ void TIM3_Init() {
     // Задаём значение делителя счётчика (на 1 меньше желаемого значения)
     WRITE_REG(TIM3->PSC, 36-1);
     // Задаём значение таймера, до которого он будет считать
-    WRITE_REG(TIM3->ARR, 10);
+    WRITE_REG(TIM3->ARR, 10-1);
     // Разрешаем использование прерывания по переполнению
     TIM_EnableIT_UPDATE(TIM3);
     // Запускаем счётчик
     TIM_EnableCounter(TIM3);
 }
 
-// Прерывание таймера 2
+// Прерывание таймера 2 (работа с HC-SR04)
 void TIM2_IRQHandler() {
+    // Счётчик для датчика 
+    static volatile uint16_t sensorTrig = 10000;
     // Проверяем, вызвано ли прерывание переполнением счётчика
     if (!TIM_UpdateFlag(TIM2)) return;
     // Сбрасываем флаг переполнения счётчика
     TIM_ClearUpdateFlag(TIM2);
+
+    if (sensorTrig > 0) sensorTrig--;
+    else {
+        if (HCSR04_TRIG_PORT->ODR & GPIO_ODR_ODR7) {
+            HCSR04_TRIG_PORT->BSRR = GPIO_BSRR_BR7;
+            sensorTrig = 19996;
+            return;
+        } else {
+            HCSR04_TRIG_PORT->BSRR = GPIO_BSRR_BS7;
+            sensorTrig = 4;
+            return;
+        }
+    }
 }
 
-// Прерывание таймера 3
+// Прерывание таймера 3 (работа с сервоприводом)
 void TIM3_IRQHandler() {
+    // Счётчик импульсов сервопривода 
+    static volatile uint16_t servoCounter;
     // Проверяем, вызвано ли прерывание переполнением счётчика
     if (!TIM_UpdateFlag(TIM3)) return;
     // Сбрасываем флаг переполнения счётчика
     TIM_ClearUpdateFlag(TIM3);
+
+    // Проверка значения счетчика
     if (servoCounter < 4000) {
-        // Выключаем импульс на сервопривод
-        if (servoCounter > servoPosition) GPIOC->BSRR = GPIO_BSRR_BR15;
         servoCounter++;
+        // Выключаем импульс на сервопривод
+        if (servoCounter >= servoPosition) SERVO_PORT->BSRR = GPIO_BSRR_BR13;
     } else {
         servoCounter = 0;
         // Подаём импульс на сервопривод
-        GPIOC->BSRR = GPIO_BSRR_BS15;
+        SERVO_PORT->BSRR = GPIO_BSRR_BS13;
     }
 }
 
@@ -219,35 +266,75 @@ int16_t my_abs(int16_t value) {
     else return value;
 }
 
-// Отправка сообщений для дебага
-void debug(uint16_t hcsr04_time, int16_t u) {
-    // Строка для готового сообщения
-    char str[STR_MAX];
-    // Дистанция в сантиметрах
-    uint16_t distance;
-    // Формируем переменные
-    distance = hcsr04_time / 58;
-    // Формируем строку для передачи данных
-    sprintf(str, "Time is %d us.\nDistance is %d.\nInput is %d.\n", hcsr04_time, distance, u);
-    // Отправляем строку на ПК
-    USART1_TxStr(str);
+// Является ли str дробным числом
+uint8_t isFloat(const char* str) {
+    for (uint16_t i = 0; str[i] != '\0'; i++)
+        if ((str[i] < 48 || str[i] > 57) && str[i] != '-' && str[i] != '.') return 0;
+    return 1;
 }
 
-// Повернуть сервопривод на угол, -200 <= angle <= 200
-void servoSet(int16_t angle) {
-    // Проверка на дурака
-    if (angle > 100 || angle < -100) return;
-    /*
-    int16_t step = 10;
-    int16_t diff = servoPosition - (SERVO_CENTER + angle);
-    if (my_abs(diff) >= step) {
-        if (diff > 0) servoPosition -= step;
-        else if (diff < 0) servoPosition += step;
-    } else if (diff != 0) {
-        if (diff > 0) servoPosition -= diff;
-        else if (diff < 0) servoPosition += diff;
-    } */
-    servoPosition = (SERVO_CENTER + angle);
+// Возращает количество элементов, которые можно парсить
+uint16_t parsingCount(const char* str, char separator) {
+    // Флаг
+    uint8_t flag = 0;
+    // Счетчик
+    uint16_t counter = 0;
+    // Обход по строке
+    for (uint16_t i = 0; str[i] != '\0' && i < STR_MAX; i++) {
+        if (str[i] != separator) {
+            if (flag == 0) flag = ++counter;
+        } else flag = 0;
+    }
+    // Вернуть количество распознанных элементов
+    return counter;
+}
+
+// Возращает количество элементов, которые можно парсить
+void parsing(char* destStr, const char* str, char separator, uint16_t index) {
+    // Очистка строки ответа
+    memset(destStr, '\0', STR_MAX);
+    // Флаг
+    uint8_t flag = 0;
+    // Счетчик
+    uint16_t count = 0;
+    // Счетчик символов строки
+    uint16_t strCount = 0;
+    // Обход по строке
+    for (uint16_t i = 0; str[i] != '\0' && i < STR_MAX; i++) {
+        if (str[i] != separator) {
+            if (flag == 0) flag = ++count;
+        } else flag = 0;
+        // Копируем строку, если совпадает
+        if (flag != 0 && index == (count - 1)) {
+            destStr[strCount++] = str[i];
+        }
+    }
+}
+
+// Обработчик введенного пользователем текста
+struct user_input* textProcessing(const char* str) {
+    static struct user_input tmp;
+    // Флаг
+    uint8_t flag = 0;
+    // Счетчик
+    tmp.field_count = 0;
+    // Счетчик символов строки
+    uint16_t strCount = 0;
+    // Обход по строке
+    for (uint16_t i = 0; str[i] != '\0'; i++) {
+        if (str[i] != ' ') {
+            if (flag == 0) flag = ++tmp.field_count;
+        } else {
+            tmp.field[flag - 1][strCount] = '\0';
+            flag = strCount = 0;
+        }
+        // Копируем строку, если совпадает
+        if (flag != 0) {
+            tmp.field[flag - 1][strCount++] = str[i];
+        }
+    }
+    tmp.field[flag - 1][strCount] = '\0';
+    return &tmp;
 }
 
 int main() {
@@ -262,91 +349,37 @@ int main() {
     // Инициализируем SysTick
     SysTick_Init();
     // Инициализируем USART1
-    USART1_Init();
+    USART1_Init(); 
 
-    // Время приходящего с датчика импульса в мкс
-    volatile uint16_t time, lastTime;
-    double period;
-
-    // Входное воздействие (сигнал с датчика расстояния)
-    double P = 0, I = 0, D = 0, lastP = 0;
-    // Коэффициенты регулятора
-    double kp, ki, kd;
-
-    // Топ коэффициентов:
-    // P * I * D
-    // 1) 3 * 0.2 * 0.1
-    // 2) 2 * 0.4 * 0.1
-
-    // Коэффициент пропорциональности
-    kp = 2;
-    // Коэффициент интегрирования
-    ki = 0.4;
-    // Коэффициент дифференцирования
-    kd = 0.1; 
-    // Выходной сигнал (сигнал управления сервоприводом)
-    // От -100 до 100
-    double y = 0, currentY = 0, step = 10, diff; 
+    char* str;
+    char instr[16];
+    struct user_input* user_str;
 
     while (1) {
-        // Делаем задержку на 10 мкс
-        TIM2->CNT = 10;
-        // Подаём сигнал Trig
-        SET_BIT(GPIOB->BSRR, GPIO_BSRR_BS3);
-        //Запускаем таймер 2
-        TIM_EnableCounter(TIM2);
-        // Ждём пока таймер 2 отсчитает 10 мкс
-        while(TIM2->CNT != 0) {}
-        // Выключаем таймер 2
-        TIM_DisableCounter(TIM2);
-        // Выключаем Trig
-        SET_BIT(GPIOB->BSRR, GPIO_BSRR_BR3);
-        // Очищаем счётчик таймера 2
-        TIM2->CNT = 60000;
-        // Ожидаем сигнала на Echo
-        while(READ_BIT(~GPIOB->IDR, GPIO_IDR_IDR11)) {}
-        // Включаем таймер 2
-        TIM_EnableCounter(TIM2);
-        // Ожидаем падение сигнала на Echo
-        while(READ_BIT(GPIOB->IDR, GPIO_IDR_IDR11)) {}
-        // Выключем таймер 2
-        TIM_DisableCounter(TIM2);
-        // Сохраняем значение таймера 2
-        time = 60000 - TIM2->CNT;
-        // Формируем сообщение и отправляем на ПК
-        if (DEBUG_MODE) debug(time, P);
-        
-        // Отбрасываем некорректные замеры датчика
-        if (time > HCSR04_RIGHT) time = lastTime;
-        
-        // Находим период замера показаний датчика
-        period = 0.050;
-        // Вычисляем коэффициент пропорциональности
-        P = (int32_t)HCSR04_CENTER - (int32_t)time;
-        P *= 0.01;
-        // Вычисляем коэффициент интегрирования
-        I = I + P * period;
-        // Вычисляем коэффициент дифференцирования
-        D = (P - lastP) / period;
-        // Находим выходной сигнал регулятора
-        y = P*kp + I*ki + D*kd;
+        // Запускаем таймер на 50 мс
+        SysCounter = 50;
+        // Выводим надпись
+        USART1_TxStr("~> ");
 
-        /*
-        diff = my_abs(y - currentY);
-        if (diff >= step) {
-            if (y > currentY) currentY += step;
-            else currentY -= step;
-        } else if (diff != 0) {
-            if (y > currentY) currentY += diff;
-            else currentY -= diff;
-        }*/
 
-        // Выставляем нужный угол сервопривода
-        servoSet(-y);
-        // Запоминаем предыдущее показние датчика
-        lastTime = time;
-        lastP = P;
-        // Делаем задержку перед следующим замером
-        delay_ms(50);
+        // Пока ожидаем таймер, обрабатываем USART1
+        while(SysCounter) {
+            if ((str = USART1_Tick()) != NULL) {
+                USART1_Tx('\n');
+
+                user_str = textProcessing(str);
+
+                if (user_str->field_count == 0) {
+                    USART1_TxStr("ERROR: You didn't enter anything\n");
+                }
+
+                if (strcmp(user_str->field[0], "set")) {
+                    
+                }
+                for (uint8_t i = 0; i < user_str->field_count; i++) {
+                   
+                }
+            }
+        }
     }
 }
