@@ -337,6 +337,22 @@ struct user_input* textProcessing(const char* str) {
     return &tmp;
 }
 
+// Список инструкций
+const char* instructions[] = { "set", "get", "watch", "save" };
+// Список аргументов для команды set
+const char* argSet[] = { "pid-p", "pid-i", "pid-d", "T", "d" };
+// Список инструкций
+const char* argGet[] = { "pid-p", "pid-i", "pid-d", "T", "d" };
+// Количество элементов в массиве строк
+#define str_array_size(array) sizeof(array) / sizeof(char*)
+
+// Находит совпадающую строку
+uint8_t find(const char* str, const char** str_array, uint8_t size) {
+    for (uint8_t i = 0; i < size; i++)
+        if (!strcmp(str, str_array[i])) return i;
+    return -1;
+}
+
 int main() {
     // Инициализируем RCC
     RCC_Init();
@@ -354,8 +370,15 @@ int main() {
     char* str;
     char instr[16];
     struct user_input* user_str;
+    uint8_t instr_index;
+    uint8_t arg_index;
+
+    float pid_p, pid_i, pid_d;
+    float T, d;
 
     while (1) {
+        // Очищаем текущее значение таймера
+        CLEAR_BIT(SysTick->VAL, SysTick_VAL_CURRENT_Msk);
         // Запускаем таймер на 50 мс
         SysCounter = 50;
         // Выводим надпись
@@ -365,19 +388,45 @@ int main() {
         // Пока ожидаем таймер, обрабатываем USART1
         while(SysCounter) {
             if ((str = USART1_Tick()) != NULL) {
-                USART1_Tx('\n');
-
+                USART1_Tx('\n\r');
+                
+                // Разделяем строку на отдельные слова
                 user_str = textProcessing(str);
 
+                // Если ничего не введено
                 if (user_str->field_count == 0) {
-                    USART1_TxStr("ERROR: You didn't enter anything\n");
+                    USART1_TxStr("ERROR: You didn't enter anything\n\r");
+                    continue;
                 }
 
-                if (strcmp(user_str->field[0], "set")) {
-                    
+                // Определяем индекс инструкции
+                instr_index = find(user_str->field[0], instructions, str_array_size(instructions));
+                if (instr_index == 255) {
+                    USART1_TxStr("ERROR: Unknown command \"");
+                    USART1_TxStr(user_str->field[0]);
+                    USART1_TxStr("\"\n\r");
+                    continue;
                 }
-                for (uint8_t i = 0; i < user_str->field_count; i++) {
-                   
+
+                // Проходим по всем аргументам
+                for (uint8_t i = 1; i < user_str->field_count; i++) {
+                    // Если это команда set
+                    if (instr_index == 0) {
+                        // Если это аргумент
+                        if ((i % 2) == 1) {
+                            arg_index = find(user_str->field[i], argSet, str_array_size(argSet));
+                            if (arg_index == 255) {
+                                USART1_TxStr("ERROR: Unknown argument \"");
+                                USART1_TxStr(user_str->field[i]);
+                                USART1_TxStr("\"\n\r");
+                                continue;
+                            }
+                        } 
+                        // Если это значение аргументаs
+                        else {
+                            
+                        }
+                    }
                 }
             }
         }
