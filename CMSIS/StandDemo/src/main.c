@@ -37,7 +37,18 @@
 volatile uint32_t SysCounter = 0;
 
 // Текущее положение сервопривода (тиков таймера)
-volatile int16_t servoPosition = 500;
+volatile int16_t servoPosition = 0;
+volatile int16_t servoCenterPosition = 300;
+volatile uint16_t sensorValue = 0;
+volatile float sensorDistanceCM = 0;
+
+volatile float pid_p = 0, pid_i = 0, pid_d = 0;
+volatile float T = 0.2, d = 0.8;
+volatile float setPoint = 25.0;
+
+volatile float d2y, dy, y;
+
+volatile float P, I, D;
 
 struct user_input {
     char field[16][32];
@@ -123,7 +134,7 @@ void GPIO_Init() {
     MODIFY_REG(HCSR04_TRIG_PORT->CRL, GPIO_CRL_MODE7|GPIO_CRL_CNF7, GPIO_CRL_MODE7_0|GPIO_CRL_CNF7_0); 
     HCSR04_TRIG_PORT->BSRR = GPIO_BSRR_BS7;
     // Настраиваем Echo
-    MODIFY_REG(HCSR04_ECHO_PORT->CRL, GPIO_CRL_MODE6|GPIO_CRL_CNF6, GPIO_CRL_CNF6_1);
+    MODIFY_REG(HCSR04_ECHO_PORT->CRL, GPIO_CRL_MODE6|GPIO_CRL_CNF6, GPIO_CRL_CNF6_0);
 }
 
 // Инициализация работы USART1
@@ -230,13 +241,25 @@ void TIM2_IRQHandler() {
     else {
         if (HCSR04_TRIG_PORT->ODR & GPIO_ODR_ODR7) {
             HCSR04_TRIG_PORT->BSRR = GPIO_BSRR_BR7;
-            sensorTrig = 19996;
+            sensorTrig = 9996;
             return;
         } else {
+            d2y = sensorDistanceCM/(T*T) - 2*d*dy/T - y/(T*T);
+            dy = dy + d2y*0.02;
+            y = y + dy*0.02;
             HCSR04_TRIG_PORT->BSRR = GPIO_BSRR_BS7;
             sensorTrig = 4;
             return;
         }
+    }
+
+    // Если пришёл сигнал
+    if (HCSR04_ECHO_PORT->IDR & GPIO_IDR_IDR6) sensorValue++;
+    // Если сигнал пропал
+    else if (sensorValue != 0) {
+        sensorDistanceCM = (sensorValue * (float)2.0) / (float)58.0;
+        if (sensorDistanceCM > 50.0) sensorDistanceCM = 50;
+        sensorValue = 0;
     }
 }
 
@@ -250,10 +273,10 @@ void TIM3_IRQHandler() {
     TIM_ClearUpdateFlag(TIM3);
 
     // Проверка значения счетчика
-    if (servoCounter < 4000) {
+    if (servoCounter < 8000) {
         servoCounter++;
         // Выключаем импульс на сервопривод
-        if (servoCounter >= servoPosition) SERVO_PORT->BSRR = GPIO_BSRR_BR13;
+        if (servoCounter >= (servoCenterPosition - servoPosition)) SERVO_PORT->BSRR = GPIO_BSRR_BR13;
     } else {
         servoCounter = 0;
         // Подаём импульс на сервопривод
@@ -271,44 +294,6 @@ uint8_t isFloat(const char* str) {
     for (uint16_t i = 0; str[i] != '\0'; i++)
         if ((str[i] < 48 || str[i] > 57) && str[i] != '-' && str[i] != '.') return 0;
     return 1;
-}
-
-// Возращает количество элементов, которые можно парсить
-uint16_t parsingCount(const char* str, char separator) {
-    // Флаг
-    uint8_t flag = 0;
-    // Счетчик
-    uint16_t counter = 0;
-    // Обход по строке
-    for (uint16_t i = 0; str[i] != '\0' && i < STR_MAX; i++) {
-        if (str[i] != separator) {
-            if (flag == 0) flag = ++counter;
-        } else flag = 0;
-    }
-    // Вернуть количество распознанных элементов
-    return counter;
-}
-
-// Возращает количество элементов, которые можно парсить
-void parsing(char* destStr, const char* str, char separator, uint16_t index) {
-    // Очистка строки ответа
-    memset(destStr, '\0', STR_MAX);
-    // Флаг
-    uint8_t flag = 0;
-    // Счетчик
-    uint16_t count = 0;
-    // Счетчик символов строки
-    uint16_t strCount = 0;
-    // Обход по строке
-    for (uint16_t i = 0; str[i] != '\0' && i < STR_MAX; i++) {
-        if (str[i] != separator) {
-            if (flag == 0) flag = ++count;
-        } else flag = 0;
-        // Копируем строку, если совпадает
-        if (flag != 0 && index == (count - 1)) {
-            destStr[strCount++] = str[i];
-        }
-    }
 }
 
 // Обработчик введенного пользователем текста
@@ -337,21 +322,105 @@ struct user_input* textProcessing(const char* str) {
     return &tmp;
 }
 
-// Список инструкций
-const char* instructions[] = { "set", "get", "watch", "save" };
-// Список аргументов для команды set
-const char* argSet[] = { "pid-p", "pid-i", "pid-d", "T", "d" };
-// Список инструкций
-const char* argGet[] = { "pid-p", "pid-i", "pid-d", "T", "d" };
-// Количество элементов в массиве строк
-#define str_array_size(array) sizeof(array) / sizeof(char*)
-
 // Находит совпадающую строку
 uint8_t find(const char* str, const char** str_array, uint8_t size) {
     for (uint8_t i = 0; i < size; i++)
         if (!strcmp(str, str_array[i])) return i;
     return -1;
 }
+
+/* There are also built-in functions for these */
+uint8_t isdigit(char c) {
+   return c >= '0' && c <= '9';
+}
+
+uint8_t isspace(char c) {
+   return c == ' ';
+}
+
+
+int itoa_s(int value, char *buf) {
+        int index = 0;
+        int i = value % 10;
+        if (value >= 10) {
+                index += itoa_s(value / 10, buf);
+        }
+        buf[index] = i+0x30;
+        index++;
+        return index;
+}
+
+/* Definition of atof */
+float atof(char s[]) {
+    float val, power;
+    int i, sign;
+
+    // Skip initial whitespace
+    for (i = 0; isspace(s[i]); i++);
+
+    // Look for sign prefix
+    sign = (s[i] == '-') ? -1 : 1;
+    if (s[i] == '+' || s[i] == '-') ++i;
+
+    // Compute the value for all digits before the point
+    for (val = 0.0; isdigit(s[i]); ++i) {
+        val = 10.0 * val + (s[i] - '0');
+    }
+
+    // Compute the fractional power for all digits after the point
+    if (s[i] == '.') {
+        ++i;
+    }
+
+    for (power = 1.0; isdigit(s[i]); ++i) {
+        val = 10.0 * val + (s[i] - '0');
+        power *= 10.0;
+    }
+
+    return (sign * val / (power));
+}
+
+
+void ftoa(float value, int decimals, char* buf) {
+        int index = 0;
+        // Handle negative values
+        if (value < 0) {
+                buf[index++] = '-';
+                value = -value;
+        }
+        
+        // Rounding
+        float rounding = 0.5;
+        for (int d = 0; d < decimals; rounding /= 10.0, d++);
+        value += rounding;
+
+        // Integer part
+        index += itoa_s((int)(value), buf+index);
+        buf[index++] = '.';
+
+        // Remove everything except the decimals
+        value = value - (int)(value);
+
+        // Convert decmial part to integer
+        int ival = 1;
+        for (int d = 0; d < decimals; ival *= 10, d++);
+        ival *= value;
+
+        // Add decimal part to string
+        index += itoa_s(ival, buf+index);
+        buf[index] = '\0';
+}
+
+// Список инструкций
+const char* instructions[] = { "set", "get", "watch", "save" };
+// Список аргументов для команды set
+const char* argSet[] = { "pid-p", "pid-i", "pid-d", "T", "d", "servo", "servo_default", "pid" };
+// Список инструкций
+const char* argGet[] = { "all", "pid-p", "pid-i", "pid-d", "T", "d", "servo", "servo_default", "sensor", "pid" };
+// Список инструкций
+const char* argWatch[] = { "sensor", "y", "dy"};
+// Количество элементов в массиве строк
+#define str_array_size(array) sizeof(array) / sizeof(char*)
 
 int main() {
     // Инициализируем RCC
@@ -368,28 +437,69 @@ int main() {
     USART1_Init(); 
 
     char* str;
-    char instr[16];
+    char tmp[32];
     struct user_input* user_str;
-    uint8_t instr_index;
-    uint8_t arg_index;
-
-    float pid_p, pid_i, pid_d;
-    float T, d;
+    uint8_t instr_index = 255;
+    uint8_t arg_index = 255;
+    uint8_t welcome_flag = 1;
+    uint8_t tmp_for_all = 1;
+    uint8_t watch_index[10];
+    memset(watch_index, 255, 10);
+    uint8_t watch_flag = 0;
+    uint8_t regulator = 1;
 
     while (1) {
         // Очищаем текущее значение таймера
         CLEAR_BIT(SysTick->VAL, SysTick_VAL_CURRENT_Msk);
         // Запускаем таймер на 50 мс
-        SysCounter = 50;
-        // Выводим надпись
-        USART1_TxStr("~> ");
+        SysCounter = 25;
 
+        if (welcome_flag) {
+            // Выводим надпись
+            USART1_TxStr("~> ");
+            welcome_flag = 0;
+        }
+
+        // Обработка команды watch
+        watch_flag = 0;
+        for (uint8_t i = 0; watch_index[i] != 255; i++) {
+            if (watch_flag) USART1_TxStr(",");
+            if (watch_index[i] == 0) {
+                ftoa(sensorDistanceCM*10, 2, tmp);
+                USART1_TxStr(tmp);
+            } else if (watch_index[i] == 1) {
+                ftoa(y*10, 2, tmp);
+                USART1_TxStr(tmp);
+            } else if (watch_index[i] == 2) {
+                ftoa(dy*10, 2, tmp);
+                USART1_TxStr(tmp);
+            }
+            watch_flag = 1;
+        }
+        if (watch_flag) USART1_TxStr("\n\r");
+
+        
+        P = setPoint - y;
+        I = I + P * 0.025;
+        D = dy;
+
+        // Если регулятор включен
+        if (regulator) servoPosition = pid_p * P + pid_i * I + pid_d * D;
+        if (servoPosition > 100) servoPosition = 100;
+        else if (servoPosition < -100) servoPosition = -100;
 
         // Пока ожидаем таймер, обрабатываем USART1
         while(SysCounter) {
             if ((str = USART1_Tick()) != NULL) {
-                USART1_Tx('\n\r');
+                welcome_flag = 1;
+                USART1_TxStr("\n\r");
                 
+                // Если пришёл символ отмены
+                if (!strcmp(str, "c")) {
+                    memset(watch_index, 255, 10);
+                    continue;
+                }
+
                 // Разделяем строку на отдельные слова
                 user_str = textProcessing(str);
 
@@ -418,14 +528,154 @@ int main() {
                             if (arg_index == 255) {
                                 USART1_TxStr("ERROR: Unknown argument \"");
                                 USART1_TxStr(user_str->field[i]);
+                                USART1_TxStr("\" for command \"");
+                                USART1_TxStr(instructions[instr_index]);
                                 USART1_TxStr("\"\n\r");
                                 continue;
                             }
                         } 
-                        // Если это значение аргументаs
+                        // Если это значение аргумента
                         else {
-                            
+                            if (!isFloat(user_str->field[i])) {
+                                USART1_TxStr("ERROR: Incorrect argument value \"");
+                                USART1_TxStr(user_str->field[i]);
+                                USART1_TxStr("\"\n\r");
+                                continue;
+                            }
+                            if (arg_index == 0) {
+                                pid_p = atof(user_str->field[i]);
+                                USART1_TxStr("PID-P is set to ");
+                                ftoa(pid_p, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 1) {
+                                pid_i = atof(user_str->field[i]);
+                                USART1_TxStr("PID-I is set to ");
+                                ftoa(pid_i, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 2) {
+                                pid_d = atof(user_str->field[i]);
+                                USART1_TxStr("PID-D is set to ");
+                                ftoa(pid_d, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 3) {
+                                T = atof(user_str->field[i]);
+                                USART1_TxStr("Filter-T is set to ");
+                                ftoa(T, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 4) {
+                                d = atof(user_str->field[i]);
+                                USART1_TxStr("Filter-d is set to ");
+                                ftoa(d, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 5) {
+                                servoPosition = (int16_t)atof(user_str->field[i]);
+                                USART1_TxStr("Servo is set to ");
+                                ftoa(servoPosition, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 6) {
+                                servoCenterPosition = (uint16_t)atof(user_str->field[i]);
+                                USART1_TxStr("Servo default is set to ");
+                                ftoa(servoCenterPosition, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 7) {
+                                regulator = (uint16_t)atof(user_str->field[i]);
+                                USART1_TxStr("Regulator state is set to ");
+                                ftoa(regulator, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            }
                         }
+                    } 
+                    // Если это команда get
+                    else if (instr_index == 1) {
+                        arg_index = find(user_str->field[i], argGet, str_array_size(argGet));
+                        if (arg_index == 255) {
+                            USART1_TxStr("ERROR: Unknown argument \"");
+                            USART1_TxStr(user_str->field[i]);
+                            USART1_TxStr("\" for command \"");
+                            USART1_TxStr(instructions[instr_index]);
+                            USART1_TxStr("\"\n\r");
+                            continue;
+                        }
+                        tmp_for_all = 1;
+                        for (uint8_t i = 0; i < tmp_for_all; i++) {
+                            if (tmp_for_all != 1) arg_index = i;
+                            if (arg_index == 0) {
+                                tmp_for_all = str_array_size(argGet);
+                            } else if (arg_index == 1) {
+                                USART1_TxStr("PID-P is ");
+                                ftoa(pid_p, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 2) {
+                                USART1_TxStr("PID-I is ");
+                                ftoa(pid_i, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 3) {
+                                USART1_TxStr("PID-D is ");
+                                ftoa(pid_d, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 4) {
+                                USART1_TxStr("Filter-T is ");
+                                ftoa(T, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 5) {
+                                USART1_TxStr("Filter-d is ");
+                                ftoa(d, 3, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 6) {
+                                USART1_TxStr("Servo is ");
+                                ftoa(servoPosition, 0, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 7) {
+                                USART1_TxStr("Servo default is ");
+                                ftoa(servoCenterPosition, 0, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 8) {
+                                USART1_TxStr("Sensor distance in cm is ");
+                                ftoa(sensorDistanceCM, 2, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            } else if (arg_index == 9) {
+                                USART1_TxStr("Regulator state is ");
+                                ftoa(regulator, 2, tmp);
+                                USART1_TxStr(tmp);
+                                USART1_TxStr("\n\r");
+                            }
+                        }
+                    } 
+                    // Если это команда watch
+                    else if (instr_index == 2) {
+                        arg_index = find(user_str->field[i], argWatch, str_array_size(argWatch));
+                        if (arg_index == 255) {
+                            USART1_TxStr("ERROR: Unknown argument \"");
+                            USART1_TxStr(user_str->field[i]);
+                            USART1_TxStr("\" for command \"");
+                            USART1_TxStr(instructions[instr_index]);
+                            USART1_TxStr("\"\n\r");
+                            continue;
+                        }
+                        // Находим не занятый индекс
+                        uint8_t j;
+                        for (j = 0; watch_index[j] != 255; j++);
+                        watch_index[j] = arg_index;
+                    } 
+                    // Если это команда save
+                    else if (instr_index == 3) {
+
                     }
                 }
             }
